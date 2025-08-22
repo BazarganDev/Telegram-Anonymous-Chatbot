@@ -24,6 +24,7 @@ Never log user content or IDs unless you must. This bot stores minimal metadata.
 ~ cd Telegram-Anonymous-Chatbot
 ```
 2. Set up environment variables
+
 Edit `TELEGRAM_TOKEN`, `ADMIN_CHAT_ID` in the `.env` file with your bot token and your Telegram user ID:
 ```env
 TELEGRAM_TOKEN=your-telegram-bot-token
