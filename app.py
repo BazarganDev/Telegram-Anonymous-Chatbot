@@ -104,16 +104,6 @@ class DB:
         )
         self._conn.commit()
 
-    # def set_partner(self, a: int, b: Optional[int]):
-    #     now = time.time()
-    #     for u, p in ((a, b), (b, a) if b is not None else ()):
-    #         self._conn.execute(
-    #             "INSERT INTO users(user_id,in_queue,partner_id,updated_at) VALUES(?,0,?,?)\n"
-    #             "ON CONFLICT(user_id) DO UPDATE SET in_queue=0, partner_id=excluded.partner_id, updated_at=excluded.updated_at",
-    #             (u, p, now),
-    #         )
-    #     self._conn.commit()
-
     def set_partner(self, a: int, b: Optional[int]):
         now = time.time()
         pairs = [(a, b)]
@@ -417,3 +407,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
+
