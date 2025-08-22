@@ -19,26 +19,25 @@ Never log user content or IDs unless you must. This bot stores minimal metadata.
 
 ## Installation
 1. Clone the repository:
-```bash
-~ git clone https://github.com/BazarganDev/Telegram-Anonymous-Chatbot/
-~ cd Telegram-Anonymous-Chatbot
-```
-2. Set up environment variables
-
-Edit `TELEGRAM_TOKEN`, `ADMIN_CHAT_ID` in the `.env` file with your bot token and your Telegram user ID:
-```env
-TELEGRAM_TOKEN=your-telegram-bot-token
-ADMIN_CHAT_ID=your-telegram-userID
-DATABASE_PATH=anonchat.db
-```
-3. Install Dependencies
-```
-pip install -r requirements.txt
-```
-4. Run the bot
-```
-python app.py
-```
+   ```bash
+   ~ git clone https://github.com/BazarganDev/Telegram-Anonymous-Chatbot/
+   ~ cd Telegram-Anonymous-Chatbot
+   ```
+2. Set up environment variables:<br>
+   Edit `TELEGRAM_TOKEN`, `ADMIN_CHAT_ID` in the `.env` file with your bot token and your Telegram user ID:
+   ```env
+   TELEGRAM_TOKEN=your-telegram-bot-token
+   ADMIN_CHAT_ID=your-telegram-userID
+   DATABASE_PATH=anonchat.db
+   ```
+3. Install Dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+4. Run the bot:
+   ```
+   python app.py
+   ```
 
 ## Contribution
 Contributions are welcome! Please fork the repository and submit a pull request for any enhancements or bug fixes.
