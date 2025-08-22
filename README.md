@@ -6,14 +6,16 @@
 The Anonymous Telegram Chat Bot is designed for one-to-one random chats while ensuring user anonymity. It allows users to connect with others without revealing their identities, making it a safe space for open conversations.
 
 ## Features
-- Full Anonymity: Messages are relayed using copy_message, ensuring no usernames or IDs are shown.
-- Supports various message types such as text, photos, videos, voice messages and audio.
-- Anti-Spam Mechanism: Simple throttle per user to prevent spam.
-- Abuse Reporting: You can log a report to SQLite and it will notify the admin about the report.
-- Crash-Safe: User states are stored in SQLite; sessions are cleared on restart to avoid ghost links.
+- Full anonymity: messages are relayed with copy_message (no username/ID shown).
+- Matchmaking: /find pairs users; /stop ends; /next finds a new partner.
+- Supports most message types: text, photos, videos, voice, documents, stickers, locations, etc.
+- Simple anti-spam throttle per user.
+- Abuse reporting: /report logs a report to SQLite; optional ADMIN_CHAT_ID notified.
+- Crash-safe: user states kept in SQLite; on restart, sessions are cleared to avoid ghost links.
+- Clean, typed, and structured with python-telegram-bot v21+ (async API).
 
 ## Security Note
-The bot does not log user content or IDs unless absolutely necessary. It stores minimal metadata to maintain user privacy.
+Never log user content or IDs unless you must. This bot stores minimal metadata.
 
 ## Installation
 1. Clone the repository:
