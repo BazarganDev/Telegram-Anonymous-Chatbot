@@ -272,8 +272,10 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "You are not in a chat. Use /find to start."
         )
         return
-    DBI.set_queue(user_id, False)
+    # Tear down the session for both sides
     await end_session(context, user_id)
+    # Update queue state after clearing pairing
+    DBI.set_queue(user_id, False)
     await update.effective_message.reply_html(
         "Chat ended. Use /find to meet someone new."
     )
