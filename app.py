@@ -379,29 +379,8 @@ async def main():
     app.add_handler(CommandHandler("report", report_cmd))
     # Register relay handler for supported types
     app.add_handler(MessageHandler(SUPPORTED, relay))
-    # Run until SIGINT/SIGTERM
-    stop_event = asyncio.Event()
 
-    def _signal(*_):
-        stop_event.set()
-
-    for s in (signal.SIGINT, signal.SIGTERM):
-        try:
-            asyncio.get_running_loop().add_signal_handler(s, _signal)
-        except NotImplementedError:
-            pass  # Windows
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-    logger.info("Bot started.")
-
-    await stop_event.wait()
-
-    logger.info("Shutting down...")
-    await app.updater.stop()
-    await app.stop()
-    await app.shutdown()
+    await app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
@@ -409,4 +388,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
-
