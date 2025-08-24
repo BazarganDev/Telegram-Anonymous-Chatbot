@@ -371,7 +371,7 @@ def _build_app() -> Application:
 async def main():
     app = _build_app()
     # Register command handlers
-    app.add_handler(CommandHandler(["start", "help"], start))
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("find", find_cmd))
     app.add_handler(CommandHandler("stop", stop_cmd))
