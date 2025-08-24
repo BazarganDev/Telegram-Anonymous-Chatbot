@@ -6,7 +6,7 @@ Anonymous Telegram Chat Bot (one-to-one random chat)
 Features:
 - Full anonymity: messages are relayed with copy_message (no username/ID shown).
 - Matchmaking: /find pairs users; /stop ends; /next finds a new partner.
-- Supports most message types: text, photos, videos, voice, documents, stickers, locations, etc.
+- Supports most message types: text, photos, videos, voice, and audio.
 - Simple anti-spam throttle per user.
 - Abuse reporting: /report logs a report to SQLite; optional ADMIN_CHAT_ID notified.
 - Crash-safe: user states kept in SQLite; on restart, sessions are cleared to avoid ghost links.
@@ -45,7 +45,7 @@ from telegram.ext import (
 )
 
 
-# Load environment variables from .env file if present.
+# Load environment variables from `.env` file (token, admin ID, db path)
 load_dotenv()
 
 # Configuration & Logging
@@ -67,6 +67,9 @@ logger = logging.getLogger("anon-bot")
 # Database
 # A SQLite helper encapsulates user states and reports.
 class DB:
+    """
+    Lightweight SQLite database wrapper for user matchmaking state and abuse reports.
+    """
     def __init__(self, path: Path):
         self.path = path
         self._conn = sqlite3.connect(self.path)
@@ -97,6 +100,9 @@ class DB:
         self._conn.commit()
 
     def set_queue(self, user_id: int, in_queue: bool):
+        """
+        Mark user as searching for a partner or not.
+        """
         self._conn.execute(
             "INSERT INTO users(user_id, in_queue, partner_id, updated_at) VALUES(?,?,NULL,?)\n"
             "ON CONFLICT(user_id) DO UPDATE SET in_queue=excluded.in_queue, partner_id=NULL, updated_at=excluded.updated_at",
@@ -105,6 +111,9 @@ class DB:
         self._conn.commit()
 
     def set_partner(self, a: int, b: Optional[int]):
+        """
+        Set two users as partners (or clear if b=None).
+        """
         now = time.time()
         pairs = [(a, b)]
         if b is not None:
@@ -118,12 +127,18 @@ class DB:
         self._conn.commit()
 
     def clear_all_sessions(self):
+        """
+        Clear all active sessions (called on startup for crash safety).
+        """
         self._conn.execute(
             "UPDATE users SET partner_id=NULL, in_queue=0, updated_at=?", (time.time(),)
         )
         self._conn.commit()
 
     def get_partner(self, user_id: int) -> Optional[int]:
+        """
+        Return partner ID if user is in a session, else None.
+        """
         cur = self._conn.execute(
             "SELECT partner_id FROM users WHERE user_id=?", (user_id,)
         )
@@ -131,6 +146,9 @@ class DB:
         return int(row[0]) if row and row[0] is not None else None
 
     def is_in_queue(self, user_id: int) -> bool:
+        """
+        Return True if user is currently waiting for a match.
+        """
         cur = self._conn.execute(
             "SELECT in_queue FROM users WHERE user_id=?", (user_id,)
         )
@@ -138,6 +156,9 @@ class DB:
         return bool(row and row[0])
 
     def pick_waiting_peer(self, exclude: int) -> Optional[int]:
+        """
+        Pick the oldest user in queue, excluding the given user.
+        """
         cur = self._conn.execute(
             "SELECT user_id FROM users WHERE in_queue=1 AND user_id<>? ORDER BY updated_at ASC LIMIT 1",
             (exclude,),
@@ -146,6 +167,9 @@ class DB:
         return int(row[0]) if row else None
 
     def enqueue_if_missing(self, user_id: int):
+        """
+        Ensure user exists in DB, creating entry if missing.
+        """
         cur = self._conn.execute(
             "SELECT user_id FROM users WHERE user_id=?", (user_id,)
         )
@@ -157,6 +181,9 @@ class DB:
             self._conn.commit()
 
     def create_report(self, reporter_id: int, partner_id: Optional[int], reason: str):
+        """
+        Store an abuse report in DB.
+        """
         self._conn.execute(
             "INSERT INTO reports(reporter_id,partner_id,reason,created_at) VALUES(?,?,?,?)",
             (reporter_id, partner_id, reason[:1000], time.time()),
@@ -175,10 +202,16 @@ class Throttle:
 
 
 class State:
+    """
+    Tracks per-user message timestamps for flood prevention.
+    """
     def __init__(self):
         self.throttle: dict[int, Throttle] = {}
 
     def may_send(self, user_id: int, min_interval: float = 0.7) -> bool:
+        """
+        Return True if user may send a message (enforces min interval).
+        """
         t = self.throttle.setdefault(user_id, Throttle())
         now = time.time()
         if now - t.last_sent_at >= min_interval:
@@ -192,6 +225,9 @@ STATE = State()
 
 # Helper Functions
 async def send_safe(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str):
+    """
+    Send a message safely, ignoring Forbidden errors if user blocked bot.
+    """
     try:
         await context.bot.send_message(
             chat_id,
@@ -207,6 +243,9 @@ async def send_safe(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str)
 async def end_session(
     context: ContextTypes.DEFAULT_TYPE, user_id: int, notify_other: bool = True
 ):
+    """
+    End a chat session for a user (and notify partner if applicable).
+    """
     partner = DBI.get_partner(user_id)
     if partner:
         # Clear both sides of the pairing
@@ -233,16 +272,38 @@ WELCOME = (
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handler for /start command.
+
+    Ensures the user exists in the database and sends a welcome message
+    listing available commands and safety reminders.
+    """
     user_id = update.effective_user.id
     DBI.enqueue_if_missing(user_id)
     await update.effective_message.reply_html(WELCOME, disable_web_page_preview=True)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handler for /help command.
+
+    Repeats the welcome message to remind the user of all commands
+    and how to use the bot safely.
+    """
     await update.effective_message.reply_html(WELCOME, disable_web_page_preview=True)
 
 
 async def find_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handler for /find command.
+
+    1. Ensures the user exists in DB.
+    2. Checks if the user is already in a session.
+       - If yes, prompts them to /stop or /next first.
+    3. If not in session, attempts to find a waiting partner.
+       - If a partner is found, immediately pairs them and notifies both.
+       - If no partner is available, sets the user in queue and informs them.
+    """
     user_id = update.effective_user.id
     DBI.enqueue_if_missing(user_id)
     if DBI.get_partner(user_id):
@@ -266,6 +327,14 @@ async def find_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handler for /stop command.
+
+    Ends the current chat session for the user:
+    1. If the user is not in a chat, informs them to use /find.
+    2. Otherwise, clears the session for both user and partner.
+    3. Updates the user's queue state to not searching.
+    """
     user_id = update.effective_user.id
     if not DBI.get_partner(user_id) and not DBI.is_in_queue(user_id):
         await update.effective_message.reply_html(
@@ -282,7 +351,17 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handler for /next command.
+
+    Ends the current session and immediately attempts to find a new partner:
+    1. Clears existing session and queue state.
+    2. Attempts to match user with a waiting partner.
+       - If matched, notifies both users.
+       - If no partner is available, puts the user back in queue.
+    """
     user_id = update.effective_user.id
+    # Ensure user is not queued during session teardown
     DBI.set_queue(user_id, False)
     await end_session(context, user_id)
     # Immediately find a new partner
@@ -301,6 +380,13 @@ async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handler for /report command.
+
+    1. Records a report in the database.
+    2. Notifies the user that their report was submitted.
+    3. Optionally notifies the admin chat with details.
+    """
     user_id = update.effective_user.id
     partner = DBI.get_partner(user_id)
     reason = " ".join(context.args) if context.args else "[no reason given]"
@@ -322,6 +408,17 @@ SUPPORTED = filters.TEXT | filters.PHOTO | filters.VIDEO | filters.VOICE | filte
 
 
 async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Generic relay handler for almost all supported message types.
+
+    1. Checks if the user is in a chat session.
+       - If not, prompts them to use /find.
+    2. Checks throttling to prevent spam.
+    3. Copies the message to the partner while preserving anonymity.
+    4. Handles errors gracefully:
+       - Forbidden: partner blocked bot -> ends session.
+       - BadRequest / NetworkError: logs warnings without crashing.
+    """
     user_id = update.effective_user.id
     partner = DBI.get_partner(user_id)
     if not partner:
@@ -330,8 +427,7 @@ async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     if not STATE.may_send(user_id):
-        # Soft throttle
-        return
+        return  # Soft throttle
     try:
         # copy_message preserves content without attribution; truly anonymous.
         await context.bot.copy_message(
@@ -353,12 +449,25 @@ async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # App Lifecycle
 async def post_init(app: Application):
-    # Clear all sessions on startup to avoid stale pairings after a crash/redeploy.
+    """
+    Post-initialization hook.
+
+    Clears all active sessions on startup to avoid ghost links
+    caused by crashes or redeploys.
+    """
     DBI.clear_all_sessions()
     logger.info("Database ready at %s", DB_PATH)
 
 
 def _build_app() -> Application:
+    """
+    Build the Telegram bot application instance.
+
+    Configures:
+    - Token
+    - Rate limiter
+    - Post-init cleanup
+    """
     return (
         ApplicationBuilder()
         .token(TOKEN)
@@ -369,6 +478,13 @@ def _build_app() -> Application:
 
 
 async def main():
+    """
+    Main entry point of the bot.
+
+    1. Builds the application.
+    2. Registers all command and message handlers.
+    3. Runs polling indefinitely.
+    """
     app = _build_app()
     # Register command handlers
     app.add_handler(CommandHandler("start", start))
