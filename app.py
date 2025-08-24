@@ -69,12 +69,29 @@ logger = logging.getLogger("anon-bot")
 class DB:
     """
     Lightweight SQLite database wrapper for user matchmaking state and abuse reports.
+    
+    This class handles all database operations including:
+    - User state management (in queue, partnered, etc.)
+    - Matchmaking logic
+    - Abuse report storage
+    - Session cleanup for crash recovery
     """
     def __init__(self, path: Path):
+        """
+        Initialize database connection and create tables if they don't exist.
+
+        Args:
+            path: Path to SQLite database file
+        """
         self.path = path
+        # Persistent connection with WAL mode for better concurrency
         self._conn = sqlite3.connect(self.path)
         self._conn.execute("PRAGMA journal_mode=WAL;")
         # Table for users and matchmaking states
+        # user_id: Telegram user ID
+        # in_queue: Boolean flag if the user is waiting for match
+        # partner_id: ID of current chat partner
+        # updated_at: Timestamp for queue ordering and cleanup
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -86,6 +103,11 @@ class DB:
             """
         )
         # Table for abuse reports
+        # id: Auto-incrementing primary key
+        # reporter_id: User who made the report
+        # partner_id: User being reported
+        # reason: Text description of the issue
+        # created_at: Timestamp when report was made
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS reports (
@@ -102,6 +124,12 @@ class DB:
     def set_queue(self, user_id: int, in_queue: bool):
         """
         Mark user as searching for a partner or not.
+        Uses UPSERT (INSERT ... ON CONFLICT) to handle both new users
+        and updates to existing users. Clears partner_id when entering queue.
+
+        Args:
+            user_id: Telegram user ID
+            in_queue: True if user should be marked as searching
         """
         self._conn.execute(
             "INSERT INTO users(user_id, in_queue, partner_id, updated_at) VALUES(?,?,NULL,?)\n"
@@ -113,11 +141,20 @@ class DB:
     def set_partner(self, a: int, b: Optional[int]):
         """
         Set two users as partners (or clear if b=None).
+        This creates a bidirectional relationship - both users point to each other.
+        When clearing (b=None), only user 'a' is updated. Also removes users from
+        queue when they get partnered.
+
+        Args:
+            a: First user ID
+            b: Second user ID, or None to clear partnership
         """
         now = time.time()
+        # Create list of updates needed
         pairs = [(a, b)]
         if b is not None:
-            pairs.append((b, a))
+            pairs.append((b, a))    # Bidirectional relationship
+        # Update both users' records
         for u, p in pairs:
             self._conn.execute(
                 "INSERT INTO users(user_id,in_queue,partner_id,updated_at) VALUES(?,0,?,?)\n"
@@ -129,6 +166,9 @@ class DB:
     def clear_all_sessions(self):
         """
         Clear all active sessions (called on startup for crash safety).
+        This prevents "ghost" connections where users think they're connected
+        but their partner's bot instance has restarted. All users are reset
+        to disconnected state.
         """
         self._conn.execute(
             "UPDATE users SET partner_id=NULL, in_queue=0, updated_at=?", (time.time(),)
@@ -138,6 +178,11 @@ class DB:
     def get_partner(self, user_id: int) -> Optional[int]:
         """
         Return partner ID if user is in a session, else None.
+
+        Args:
+            user_id: Telegram user ID to check
+        Returns:
+            Partner's user ID if connected, None if not in chat
         """
         cur = self._conn.execute(
             "SELECT partner_id FROM users WHERE user_id=?", (user_id,)
@@ -148,6 +193,11 @@ class DB:
     def is_in_queue(self, user_id: int) -> bool:
         """
         Return True if user is currently waiting for a match.
+
+        Args:
+            user_id: Telegram user ID to check
+        Returns:
+            True if user is actively searching for a partner
         """
         cur = self._conn.execute(
             "SELECT in_queue FROM users WHERE user_id=?", (user_id,)
@@ -158,6 +208,14 @@ class DB:
     def pick_waiting_peer(self, exclude: int) -> Optional[int]:
         """
         Pick the oldest user in queue, excluding the given user.
+        Uses FIFO (first-in-first-out) ordering based on updated_at timestamp
+        to ensure fair matchmaking. Excludes the requesting user to prevent
+        self-matching.
+
+        Args:
+            exclude: User ID to exclude from selection (usually the requester)
+        Returns:
+            User ID of waiting partner, or None if no one is waiting
         """
         cur = self._conn.execute(
             "SELECT user_id FROM users WHERE in_queue=1 AND user_id<>? ORDER BY updated_at ASC LIMIT 1",
@@ -169,6 +227,11 @@ class DB:
     def enqueue_if_missing(self, user_id: int):
         """
         Ensure user exists in DB, creating entry if missing.
+        This is called when a user first interacts with the bot to ensure
+        they have a database record. New users start in disconnected state.
+
+        Args:
+            user_id: Telegram user ID to ensure exists
         """
         cur = self._conn.execute(
             "SELECT user_id FROM users WHERE user_id=?", (user_id,)
@@ -183,6 +246,13 @@ class DB:
     def create_report(self, reporter_id: int, partner_id: Optional[int], reason: str):
         """
         Store an abuse report in DB.
+        Reports are permanently stored for admin review. Reason text is
+        truncated to prevent database bloat from very long reports.
+
+        Args:
+            reporter_id: User making the report
+            partner_id: User being reported (None if no active chat)
+            reason: Description of the issue (truncated to 1000 chars)
         """
         self._conn.execute(
             "INSERT INTO reports(reporter_id,partner_id,reason,created_at) VALUES(?,?,?,?)",
@@ -198,22 +268,42 @@ DBI = DB(DB_PATH)
 # To prevent spam or floods, each user must wait a minimum interval between messages.
 @dataclass
 class Throttle:
+    """
+    Simple data class to track when a user last sent a message.
+    Used for implementing rate limiting to prevent spam.
+    """
     last_sent_at: float = 0.0
 
 
 class State:
     """
     Tracks per-user message timestamps for flood prevention.
+    This prevents users from overwhelming their chat partners with
+    rapid-fire messages. Each user has a minimum interval between
+    messages they can send.
     """
     def __init__(self):
+        """
+        Initialize empty throttle tracking dictionary.
+        """
         self.throttle: dict[int, Throttle] = {}
 
     def may_send(self, user_id: int, min_interval: float = 0.7) -> bool:
         """
         Return True if user may send a message (enforces min interval).
+        Updates the user's last_sent_at timestamp if they're allowed to send.
+        The 0.7 second default prevents most spam while allowing natural conversation.
+
+        Args:
+            user_id: Telegram user ID
+            min_interval: Minimum seconds between messages
+        Returns:
+            True if user can send message, False if they need to wait
         """
+        # Get/Create throttle record for this user
         t = self.throttle.setdefault(user_id, Throttle())
         now = time.time()
+        # Check if enough time has passed since last message
         if now - t.last_sent_at >= min_interval:
             t.last_sent_at = now
             return True
@@ -223,10 +313,18 @@ class State:
 STATE = State()
 
 
-# Helper Functions
+# Utility Functions
 async def send_safe(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str):
     """
     Send a message safely, ignoring Forbidden errors if user blocked bot.
+    This is used when sending messages to partners who might have blocked
+    the bot or deleted their account. We don't want the bot to crash in
+    these cases.
+
+    Args:
+        context: Telegram bot context
+        chat_id: Target chat ID
+        text: Message text to send
     """
     try:
         await context.bot.send_message(
@@ -236,7 +334,7 @@ async def send_safe(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str)
             disable_web_page_preview=True,
         )
     except Forbidden:
-        # Bot is blocked by user
+        # Chat is inaccessible or the bot is blocked by user
         pass
 
 
@@ -245,12 +343,22 @@ async def end_session(
 ):
     """
     End a chat session for a user (and notify partner if applicable).
+    This handles the cleanup when a chat session ends:
+    1. Find the user's current partner
+    2. Clear the partnership in database
+    3. Optionally notify the partner that chat ended
+
+    Args:
+        context: Telegram bot context
+        user_id: User whose session should be ended
+        notify_other: Whether to send notification to partner
     """
     partner = DBI.get_partner(user_id)
     if partner:
         # Clear both sides of the pairing
         DBI.set_partner(user_id, None)
         DBI.set_partner(partner, None)
+        # Notify partner unless specifically disabled
         if notify_other:
             await send_safe(context, partner, "<i>Your partner left the chat.</i>")
     else:
@@ -274,21 +382,29 @@ WELCOME = (
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handler for /start command.
+    This is typically the first command users send when they discover the bot.
+    It ensures they have a database record and shows them how to use the bot.
 
-    Ensures the user exists in the database and sends a welcome message
-    listing available commands and safety reminders.
+    Args:
+        update: Telegram update object containing message info
+        context: Bot context for sending replies
     """
     user_id = update.effective_user.id
+    # Ensure user exists in database
     DBI.enqueue_if_missing(user_id)
+    # Send welcome message with instructions
     await update.effective_message.reply_html(WELCOME, disable_web_page_preview=True)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handler for /help command.
+    Shows the same welcome message as /start to remind users of available
+    commands and usage guidelines.
 
-    Repeats the welcome message to remind the user of all commands
-    and how to use the bot safely.
+    Args:
+        update: Telegram update object
+        context: Bot context for sending replies
     """
     await update.effective_message.reply_html(WELCOME, disable_web_page_preview=True)
 
@@ -297,15 +413,21 @@ async def find_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handler for /find command.
 
-    1. Ensures the user exists in DB.
-    2. Checks if the user is already in a session.
-       - If yes, prompts them to /stop or /next first.
-    3. If not in session, attempts to find a waiting partner.
-       - If a partner is found, immediately pairs them and notifies both.
-       - If no partner is available, sets the user in queue and informs them.
+    Process:
+    1. Ensure user exists in database
+    2. Check if already in a chat (prevent multiple connections)
+    3. Try to find a waiting partner
+    4. If partner found: connect both users immediately
+    5. If no partner: put user in queue to wait for next person
+
+    Args:
+        update: Telegram update object
+        context: Bot context for sending replies and notifications
     """
     user_id = update.effective_user.id
+    # Ensure user exists in database
     DBI.enqueue_if_missing(user_id)
+    # Prevent users from finding new partners while already connected
     if DBI.get_partner(user_id):
         await update.effective_message.reply_html(
             "You're already connected. Use /stop or /next."
