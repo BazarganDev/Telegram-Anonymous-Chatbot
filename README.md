@@ -26,7 +26,7 @@ Never log user content or IDs unless you must. This bot stores minimal metadata.
 2. Set up environment variables:<br>
    Edit `TELEGRAM_TOKEN`, `ADMIN_CHAT_ID` in the `.env` file with your bot token and your Telegram user ID:
    ```env
-   TELEGRAM_TOKEN=your-telegram-bot-token
+   TELEGRAM_TOKEN=your-telegram-bot-token (Get your own bot token with @BotFather in Telegram)
    ADMIN_CHAT_ID=your-telegram-userID
    DATABASE_PATH=anonchat.db
    ```
