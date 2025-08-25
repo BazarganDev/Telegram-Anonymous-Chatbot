@@ -54,6 +54,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise RuntimeError("Please set TELEGRAM_TOKEN in the environment.")
 
+# (Optional) Admin chat ID
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 DB_PATH = Path(os.environ.get("DATABASE_PATH", "./anonchat.db")).resolve()
 
@@ -433,15 +434,19 @@ async def find_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "You're already connected. Use /stop or /next."
         )
         return
-    # Try to match
+    # Try to find someone who's already waiting
     peer = DBI.pick_waiting_peer(exclude=user_id)
+    # Try to find someone who is already waiting
     if peer is not None:
+        # Match found. Connect both users
+        # Then notify both users
         DBI.set_partner(user_id, peer)
         await send_safe(context, peer, "<i>Matched! You're now connected. Say hi.</i>")
         await update.effective_message.reply_html(
             "Matched! You're now connected. Say hi."
         )
     else:
+        # No one waiting, put this user in queue
         DBI.set_queue(user_id, True)
         await update.effective_message.reply_html(
             "Searching for a partner… you'll be matched automatically."
@@ -451,19 +456,21 @@ async def find_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handler for /stop command.
+    This allows users to disconnect from their current partner without
+    immediately looking for a new one (unlike /next).
 
-    Ends the current chat session for the user:
-    1. If the user is not in a chat, informs them to use /find.
-    2. Otherwise, clears the session for both user and partner.
-    3. Updates the user's queue state to not searching.
+    Args:
+        update: Telegram update object
+        context: Bot context for session cleanup
     """
     user_id = update.effective_user.id
+    # Check if user is actually in a chat or queue
     if not DBI.get_partner(user_id) and not DBI.is_in_queue(user_id):
         await update.effective_message.reply_html(
             "You are not in a chat. Use /find to start."
         )
         return
-    # Tear down the session for both sides
+    # End the current session for both sides
     await end_session(context, user_id)
     # Update queue state after clearing pairing
     DBI.set_queue(user_id, False)
@@ -475,26 +482,29 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handler for /next command.
+    This is a convenience command that combines /stop and /find in one action.
+    Popular in anonymous chat bots for quickly switching between partners.
 
-    Ends the current session and immediately attempts to find a new partner:
-    1. Clears existing session and queue state.
-    2. Attempts to match user with a waiting partner.
-       - If matched, notifies both users.
-       - If no partner is available, puts the user back in queue.
+    Args:
+        update: Telegram update object
+        context: Bot context for session management
     """
     user_id = update.effective_user.id
-    # Ensure user is not queued during session teardown
+    # First, clean up current session
+    # Remove from queue during cleanup
     DBI.set_queue(user_id, False)
     await end_session(context, user_id)
-    # Immediately find a new partner
+    # Then Immediately find a new partner
     peer = DBI.pick_waiting_peer(exclude=user_id)
     if peer is not None:
+        # Found someone new for connection
         DBI.set_partner(user_id, peer)
         await send_safe(context, peer, "<i>Matched! You're now connected. Say hi.</i>")
         await update.effective_message.reply_html(
             "Matched! You're now connected. Say hi."
         )
     else:
+        # No one available - put user back in queue
         DBI.set_queue(user_id, True)
         await update.effective_message.reply_html(
             "Searching for a partner… you'll be matched automatically."
@@ -504,16 +514,22 @@ async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handler for /report command.
+    Allows users to report inappropriate behavior from their chat partners.
+    Reports are stored in database and optionally sent to admin chat.
 
-    1. Records a report in the database.
-    2. Notifies the user that their report was submitted.
-    3. Optionally notifies the admin chat with details.
+    Args:
+        update: Telegram update object
+        context: Bot context containing command arguments
     """
     user_id = update.effective_user.id
     partner = DBI.get_partner(user_id)
+    # Extract reason from command arguments, or use default
     reason = " ".join(context.args) if context.args else "[no reason given]"
+    # Store report in database
     DBI.create_report(user_id, partner, reason)
+    # Confirm to user that report was received
     await update.effective_message.reply_html("Report submitted. Thank you.")
+    # Notify admin
     if ADMIN_CHAT_ID:
         try:
             await context.bot.send_message(
@@ -522,36 +538,47 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=constants.ParseMode.HTML,
             )
         except Exception:
+            # Don't crash if admin notification fails
             logger.exception("Failed to notify admin about report")
 
 
-# Generic relay for almost all content types
+# Message Relay System
+# Define which message types we can relay between users
+# NOTE: I excluded things like stickers, documents, locations for simplicity
 SUPPORTED = filters.TEXT | filters.PHOTO | filters.VIDEO | filters.VOICE | filters.AUDIO
 
 
 async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Generic relay handler for almost all supported message types.
+    This is the core of the anonymous chat - it forwards messages between
+    partners while preserving complete anonymity. Uses copy_message to
+    forward content without revealing sender information.
 
-    1. Checks if the user is in a chat session.
-       - If not, prompts them to use /find.
-    2. Checks throttling to prevent spam.
-    3. Copies the message to the partner while preserving anonymity.
-    4. Handles errors gracefully:
-       - Forbidden: partner blocked bot -> ends session.
-       - BadRequest / NetworkError: logs warnings without crashing.
+    Process:
+    1. Check if user has a chat partner
+    2. Apply rate limiting to prevent spam
+    3. Copy message to partner using copy_message (preserves anonymity)
+    4. Handle various error conditions gracefully
+
+    Args:
+        update: Telegram update containing the message to relay
+        context: Bot context for copying messages
     """
     user_id = update.effective_user.id
     partner = DBI.get_partner(user_id)
+    # Only relay if user is actually in a chat
     if not partner:
         await update.effective_message.reply_html(
             "You're not connected. Use /find to get a partner."
         )
         return
+    # Apply rate limiting to prevent spam
     if not STATE.may_send(user_id):
         return  # Soft throttle
     try:
-        # copy_message preserves content without attribution; truly anonymous.
+        # copy_message preserves content without attribution;
+        # completely hiding the original sender's identity, truly anonymous
         await context.bot.copy_message(
             chat_id=partner,
             from_chat_id=update.effective_chat.id,
@@ -564,18 +591,23 @@ async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Your partner is unavailable. Use /find to match again."
         )
     except BadRequest as e:
+        # Message couldn't be copied (unsupported type, too large, etc.)
         logger.warning("BadRequest while copying message: %s", e)
     except NetworkError:
+        # Temporary network issues - log but don't crash
         logger.warning("Network issue while relaying message")
 
 
-# App Lifecycle
+# Application Setup and Main Loop
 async def post_init(app: Application):
     """
-    Post-initialization hook.
+    Post-initialization hook called after bot starts up.
+    Performs crash recovery by clearing all active sessions. This prevents
+    "ghost" connections where users think they're connected but the bot
+    has restarted and lost session state.
 
-    Clears all active sessions on startup to avoid ghost links
-    caused by crashes or redeploys.
+    Args:
+        app: The Telegram Application instance
     """
     DBI.clear_all_sessions()
     logger.info("Database ready at %s", DB_PATH)
@@ -583,30 +615,35 @@ async def post_init(app: Application):
 
 def _build_app() -> Application:
     """
-    Build the Telegram bot application instance.
+    Build and configure the Telegram bot application instance.
 
-    Configures:
-    - Token
-    - Rate limiter
-    - Post-init cleanup
+    Sets up:
+    - Bot token for API authentication
+    - Rate limiter to prevent API flooding
+    - Post-initialization cleanup hook
+
+    Returns:
+        Configured Application instance ready for handler registration
     """
     return (
         ApplicationBuilder()
         .token(TOKEN)
-        .rate_limiter(AIORateLimiter(max_retries=2))
-        .post_init(post_init)
+        .rate_limiter(AIORateLimiter(max_retries=2))    # Prevent API rate limit hits
+        .post_init(post_init)                           # Crash recovery on startup
         .build()
     )
 
 
 async def main():
     """
-    Main entry point of the bot.
+    Main entry point of the bot application.
+    Sets up all command handlers, message handlers, and starts the bot
+    polling loop to receive updates from Telegram.
 
-    1. Builds the application.
-    2. Registers all command and message handlers.
-    3. Runs polling indefinitely.
+    Handler registration order matters - more specific handlers should
+    come before general ones.
     """
+    # Build the application instance
     app = _build_app()
     # Register command handlers
     app.add_handler(CommandHandler("start", start))
@@ -615,14 +652,16 @@ async def main():
     app.add_handler(CommandHandler("stop", stop_cmd))
     app.add_handler(CommandHandler("next", next_cmd))
     app.add_handler(CommandHandler("report", report_cmd))
-    # Register relay handler for supported types
+    # Register message relay handler for supported content types
     app.add_handler(MessageHandler(SUPPORTED, relay))
-
+    # Start polling for updates (runs indefinitely until interrupted)
     await app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
     try:
+        # Run the async main function
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
+        # Clean shutdown on Ctrl+C or system termination
         pass
